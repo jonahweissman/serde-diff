@@ -7,7 +7,7 @@ use crate::{
 use serde::{de, ser::SerializeSeq, Deserialize, Serialize};
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     hash::Hash,
 };
 
@@ -145,6 +145,7 @@ tuple_impls! {
     15 => (0 T0 1 T1 2 T2 3 T3 4 T4 5 T5 6 T6 7 T7 8 T8 9 T9 10 T10 11 T11 12 T12 13 T13 14 T14)
     16 => (0 T0 1 T1 2 T2 3 T3 4 T4 5 T5 6 T6 7 T7 8 T8 9 T9 10 T10 11 T11 12 T12 13 T13 14 T14 15 T15)
 }
+
 /// Implement SerdeDiff on a "map-like" type such as HashMap.
 macro_rules! map_serde_diff {
     ($t:ty, $($extra_traits:path),*) => {
@@ -236,6 +237,94 @@ macro_rules! map_serde_diff {
 
 map_serde_diff!(HashMap<K, V>, Hash, Eq);
 map_serde_diff!(BTreeMap<K, V>, Ord);
+
+/// Implement SerdeDiff on a "set-like" type such as HashSet.
+macro_rules! set_serde_diff {
+    ($t:ty, $($extra_traits:path),*) => {
+        impl<T> SerdeDiff for $t
+        where
+            T: SerdeDiff + Serialize + for<'a> Deserialize<'a> $(+ $extra_traits)*, // + Hash + Eq,
+        {
+            fn diff<'a, S: SerializeSeq>(
+                &self,
+                ctx: &mut $crate::difference::DiffContext<'a, S>,
+                other: &Self,
+            ) -> Result<bool, S::Error> {
+                use $crate::difference::DiffCommandRef;
+
+                let mut changed = false;
+
+                // TODO: detect renames
+                for value in self.iter() {
+                    match other.get(value) {
+                        Some(other_value) => {
+                            let save_closure = |serializer: &mut S| serializer.serialize_element(&DiffCommandRef::EnterKey(value));
+                            let mut subctx = ctx.reborrow();
+                            subctx.push_field_element(&save_closure);
+                            if <T as SerdeDiff>::diff(value, &mut subctx, other_value)? {
+                                changed = true;
+                            }
+                        },
+                        None => {
+                            ctx.save_command(&DiffCommandRef::RemoveKey(value), true, true)?;
+                            changed = true;
+                        },
+                    }
+                }
+
+                for other_value in other.iter() {
+                    if !self.contains(other_value) {
+                        ctx.save_command(&DiffCommandRef::AddKey(other_value), true, true)?;
+                        changed = true;
+                    }
+                }
+
+                if changed {
+                    ctx.save_command::<()>(&DiffCommandRef::Exit, true, false)?;
+                }
+                Ok(changed)
+            }
+
+            fn apply<'de, A>(
+                &mut self,
+                seq: &mut A,
+                ctx: &mut ApplyContext,
+            ) -> Result<bool, <A as de::SeqAccess<'de>>::Error>
+            where
+                A: de::SeqAccess<'de>,
+            {
+                let mut changed = false;
+                while let Some(cmd) = ctx.read_next_command::<A, T>(seq)? {
+                    use $crate::difference::DiffCommandValue::*;
+                    use $crate::difference::DiffPathElementValue::*;
+                    match cmd {
+                        // we should not be getting fields when reading collection commands
+                        Enter(Field(_)) => {
+                            ctx.skip_value(seq)?;
+                            break;
+                        }
+                        AddKey(value) => {
+                            self.insert(value);
+                            changed = true;
+                        }
+                        EnterKey(value) => if let Some(mut value) = self.take(&value) {
+                            changed |= <T as SerdeDiff>::apply(&mut value, seq, ctx)?;
+                            self.insert(value);
+                        } else {
+                            ctx.skip_value(seq)?;
+                        }
+                        RemoveKey(value) => changed |= self.remove(&value),
+                        _ => break,
+                    }
+                }
+                Ok(changed)
+            }
+        }
+    };
+}
+
+set_serde_diff!(HashSet<T>, Hash, Eq);
+set_serde_diff!(BTreeSet<T>, Ord);
 
 /// Implements SerdeDiff on a type given that it impls Serialize + Deserialize + PartialEq.
 /// This makes the type a "terminal" type in the SerdeDiff hierarchy, meaning deeper inspection

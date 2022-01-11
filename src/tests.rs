@@ -1,7 +1,7 @@
 use crate as serde_diff;
 use crate::{Apply, Diff, SerdeDiff};
 use serde::{Deserialize, Serialize};
-use std::fmt::Debug;
+use std::{collections::HashSet, fmt::Debug};
 
 #[derive(SerdeDiff, Serialize, Deserialize, PartialEq, Debug, Copy, Clone)]
 struct TestStruct {
@@ -133,6 +133,15 @@ fn test_tuple() {
             None,
         ),
     );
+}
+
+#[test]
+fn test_sets() {
+    let mut a = HashSet::new();
+    a.insert(1);
+    let mut b = HashSet::new();
+    a.insert(2);
+    roundtrip(a, b);
 }
 
 #[derive(SerdeDiff, Serialize, Deserialize, Clone, PartialEq, Debug)]
